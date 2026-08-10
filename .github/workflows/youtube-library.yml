@@ -1,0 +1,39 @@
+name: YouTube -> Notion Library
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"   # 10분 간격 폴링 (기존 텔레그램 뉴스봇과 동일 패턴)
+  workflow_dispatch: {}       # 수동 실행 버튼
+
+jobs:
+  poll-and-process:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # state/last_update_id.json 자동 커밋용
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run pipeline
+        env:
+          # 기존 텔레그램 뉴스봇과 별도의 봇/채널 — 시크릿 이름도 분리
+          YOUTUBE_TELEGRAM_BOT_TOKEN: ${{ secrets.YOUTUBE_TELEGRAM_BOT_TOKEN }}
+          YOUTUBE_TELEGRAM_CHAT_ID: ${{ secrets.YOUTUBE_TELEGRAM_CHAT_ID }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+        run: python youtube_to_notion.py
+
+      - name: Commit updated offset
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add state/last_update_id.json
+          git diff --staged --quiet || git commit -m "chore: update telegram offset [skip ci]"
+          git push
