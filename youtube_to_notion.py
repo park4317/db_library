@@ -130,17 +130,24 @@ def get_video_metadata(video_id: str) -> dict:
 
 def get_transcript(video_id: str) -> str | None:
     try:
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        # youtube-transcript-api v1.0+ 부터는 클래스 메서드가 아니라 인스턴스를 만들어서 써야 함
+        ytt_api = YouTubeTranscriptApi()
+        transcript_list = ytt_api.list(video_id)
+
+        transcript = None
         try:
             transcript = transcript_list.find_transcript(["ko"])
         except NoTranscriptFound:
-            transcript = transcript_list.find_transcript(["en"]).translate("ko") \
-                if transcript_list.find_transcript(["en"]) else None
+            try:
+                transcript = transcript_list.find_transcript(["en"]).translate("ko")
+            except NoTranscriptFound:
+                transcript = next(iter(transcript_list), None)
+
         if transcript is None:
-            # 사용 가능한 아무 자막이나
-            transcript = next(iter(transcript_list))
-        segments = transcript.fetch()
-        return " ".join(seg["text"] for seg in segments)
+            return None
+
+        fetched = transcript.fetch()
+        return " ".join(seg["text"] for seg in fetched.to_raw_data())
     except (TranscriptsDisabled, NoTranscriptFound, VideoUnavailable) as e:
         print(f"[자막 없음] {video_id}: {e}")
         return None
