@@ -66,44 +66,89 @@ CATEGORY_OPTIONS = [
 
 # ---------- 1. 텔레그램에서 새 메시지 가져오기 ----------
 
-def get_telegram_updates():
+def get_telegram_updates() -> tuple[list[dict], int]:
+    """Fetch channel posts from the Bot API queue without committing the cursor."""
     STATE_DIR.mkdir(exist_ok=True)
     last_update_id = 0
     if STATE_FILE.exists():
-        last_update_id = json.loads(STATE_FILE.read_text()).get("last_update_id", 0)
+        last_update_id = json.loads(STATE_FILE.read_text(encoding="utf-8")).get("last_update_id", 0)
 
     resp = requests.get(
         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates",
         params={"offset": last_update_id + 1, "timeout": 0},
-        timeout=15,
+        timeout=20,
     )
     resp.raise_for_status()
     updates = resp.json().get("result", [])
-
-    urls = []
+    items = []
     max_update_id = last_update_id
-    for u in updates:
-        max_update_id = max(max_update_id, u["update_id"])
 
-        # 채널 게시물은 "channel_post"로, 일반 그룹/DM 메시지는 "message"로 옴 — 둘 다 확인
-        message = u.get("channel_post") or u.get("message") or {}
+    for update in sorted(updates, key=lambda item: item.get("update_id", 0)):
+        update_id = update.get("update_id", 0)
+        max_update_id = max(max_update_id, update_id)
+        message = update.get("channel_post") or update.get("message") or {}
         if not message:
             continue
 
-        # 전용 채널/그룹 chat_id를 지정해둔 경우, 다른 채팅(예: 개인 DM)은 무시
-        if TELEGRAM_CHAT_ID:
-            chat_id = str((message.get("chat") or {}).get("id", ""))
-            if chat_id != str(TELEGRAM_CHAT_ID):
-                continue
+        chat = message.get("chat") or {}
+        chat_id = str(chat.get("id", ""))
+        if TELEGRAM_CHAT_ID and chat_id != str(TELEGRAM_CHAT_ID):
+            continue
 
-        text = message.get("text", "") or ""
-        for m in YOUTUBE_URL_RE.finditer(text):
-            urls.append(f"https://www.youtube.com/watch?v={m.group(1)}")
+        attachment_types = [
+            key for key in ("photo", "document", "video", "animation", "audio", "voice", "video_note", "sticker")
+            if message.get(key)
+        ]
+        text = (message.get("text") or message.get("caption") or "").strip()
+        if not text and not attachment_types:
+            continue
 
-    if max_update_id != last_update_id:
-        STATE_FILE.write_text(json.dumps({"last_update_id": max_update_id}))
+        telegram = {
+            "chat_id": chat_id,
+            "chat_title": chat.get("title") or "DB_library",
+            "message_id": str(message.get("message_id", "")),
+            "posted_at": message.get("date"),
+            "has_attachment": bool(attachment_types),
+            "attachment_types": attachment_types,
+        }
+        archive_text = text or f"[텍스트 없는 첨부 게시물: {', '.join(attachment_types)}]"
+        items.append({"kind": "telegram", "text": archive_text, "telegram": telegram, "update_id": update_id})
 
-    return urls
+        for match in YOUTUBE_URL_RE.finditer(text):
+            items.append({
+                "kind": "video",
+                "url": f"https://www.youtube.com/watch?v={match.group(1)}",
+                "update_id": update_id,
+            })
+
+    return items, max_update_id
+
+
+def commit_update_offset(update_id: int) -> None:
+    """Advance the Bot API cursor only after all archive writes succeed."""
+    STATE_DIR.mkdir(exist_ok=True)
+    temp_file = STATE_FILE.with_suffix(".tmp")
+    temp_file.write_text(json.dumps({"last_update_id": update_id}), encoding="utf-8")
+    temp_file.replace(STATE_FILE)
+
+
+def safe_error(error: Exception) -> str:
+    value = str(error)
+    if TELEGRAM_BOT_TOKEN:
+        value = value.replace(TELEGRAM_BOT_TOKEN, "[REDACTED]")
+    return f"{type(error).__name__}: {value[:300]}"
+
+
+def telegram_message_key(telegram: dict) -> str:
+    return f"{telegram.get('chat_id', '')}:{telegram.get('message_id', '')}"
+
+
+def telegram_message_link(telegram: dict) -> str:
+    chat_id = str(telegram.get("chat_id", ""))
+    message_id = telegram.get("message_id")
+    if chat_id.startswith("-100") and message_id:
+        return f"https://t.me/c/{chat_id[4:]}/{message_id}"
+    return ""
 
 
 # ---------- 2. 비디오 메타데이터 (oEmbed — API 키 불필요) ----------
@@ -222,6 +267,78 @@ def notion_headers():
     }
 
 
+def telegram_message_already_saved(telegram: dict) -> bool:
+    key = telegram_message_key(telegram)
+    resp = requests.post(
+        f"https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}/query",
+        headers=notion_headers(),
+        json={"filter": {"property": "Telegram Message ID", "rich_text": {"equals": key}}},
+        timeout=20,
+    )
+    resp.raise_for_status()
+    return bool(resp.json().get("results"))
+
+
+def _text_to_blocks(text: str) -> list[dict]:
+    blocks = []
+    for i in range(0, min(len(text), 20000), 1900):
+        blocks.append({
+            "object": "block",
+            "type": "paragraph",
+            "paragraph": {"rich_text": [{"text": {"content": text[i:i + 1900]}}]},
+        })
+    return blocks
+
+
+def save_telegram_message_to_notion(text: str, telegram: dict) -> dict | None:
+    """Archive one Telegram channel post in the existing DB_library, once per message ID."""
+    key = telegram_message_key(telegram)
+    if telegram_message_already_saved(telegram):
+        print(f"[중복 건너뜀] telegram_message_id={key}")
+        return None
+
+    title = next((line.strip() for line in text.splitlines() if line.strip()), "Telegram 첨부 게시물")
+    title = re.sub(r"^\\*+", "", title).strip()[:200] or f"Telegram message {telegram.get('message_id', '')}"
+    now = datetime.now(timezone.utc).isoformat()
+    properties = {
+        "Title": {"title": [{"text": {"content": title}}]},
+        "채널명": {"rich_text": [{"text": {"content": str(telegram.get("chat_title") or "DB_library")[:200]}}]},
+        "수집일": {"date": {"start": now}},
+        "요약": {"rich_text": [{"text": {"content": text[:1800]}}]},
+        "구분": {"select": {"name": "메모"}},
+        "Telegram Message ID": {"rich_text": [{"text": {"content": key}}]},
+        "Telegram Channel ID": {"rich_text": [{"text": {"content": str(telegram.get("chat_id", ""))}}]},
+        "Source Type": {"rich_text": [{"text": {"content": "TELEGRAM_CONTEXT"}}]},
+        "Attachment Present": {"checkbox": bool(telegram.get("has_attachment"))},
+    }
+
+    posted_at = telegram.get("posted_at")
+    if posted_at:
+        properties["게시일"] = {"date": {"start": datetime.fromtimestamp(int(posted_at), timezone.utc).isoformat()}}
+    source_link = telegram_message_link(telegram)
+    if source_link:
+        properties["URL"] = {"url": source_link}
+
+    attachment_types = telegram.get("attachment_types") or []
+    body = text
+    if attachment_types:
+        body = f"[첨부자료 있음: {', '.join(attachment_types)}]\\n\\n{text}"
+    resp = requests.post(
+        "https://api.notion.com/v1/pages",
+        headers=notion_headers(),
+        json={
+            "parent": {"database_id": NOTION_DATABASE_ID},
+            "properties": properties,
+            "children": _text_to_blocks(body),
+        },
+        timeout=30,
+    )
+    resp.raise_for_status()
+    result = resp.json()
+    print(f"[Telegram 적재 완료] telegram_message_id={key} page_id={result.get('id', '')}")
+    return result
+
+
 def save_to_notion(meta: dict, analysis: dict, transcript: str):
     today = datetime.now(timezone.utc).astimezone().date().isoformat()
 
@@ -314,16 +431,32 @@ def main():
         print("YOUTUBE_TELEGRAM_BOT_TOKEN 누락 (폴링 모드에는 필요)")
         sys.exit(1)
 
-    urls = get_telegram_updates()
-    if not urls:
-        print("새 유튜브 링크 없음")
-        return
+    try:
+        items, max_update_id = get_telegram_updates()
+        failures = []
+        for item in items:
+            update_id = item.get("update_id", "manual")
+            try:
+                if item["kind"] == "telegram":
+                    save_telegram_message_to_notion(item["text"], item["telegram"])
+                elif item["kind"] == "video":
+                    process_url(item["url"])
+            except Exception as e:
+                failures.append(update_id)
+                timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
+                print(f"[{timestamp}] [적재 실패] update_id={update_id} {safe_error(e)}")
 
-    for url in urls:
-        try:
-            process_url(url)
-        except Exception as e:
-            print(f"[에러] {url}: {e}")
+        if failures:
+            raise RuntimeError(f"{len(failures)} item(s) failed; Telegram offset was not advanced")
+
+        if not items:
+            print("새 Telegram 게시물 없음")
+        commit_update_offset(max_update_id)
+        print(f"[정상 종료] offset={max_update_id} Telegram items={len(items)}")
+    except Exception as e:
+        timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
+        print(f"[{timestamp}] [수집 실패] {safe_error(e)}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
