@@ -267,6 +267,20 @@ def notion_headers():
     }
 
 
+def notion_api_probe() -> int:
+    """Verify the configured Notion credential and DB access without writing data."""
+    resp = requests.post(
+        f"https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}/query",
+        headers=notion_headers(),
+        json={"page_size": 1},
+        timeout=15,
+    )
+    resp.raise_for_status()
+    count = len(resp.json().get("results", []))
+    print(f"[Notion 연결 확인] HTTP {resp.status_code}; rows_checked={count}")
+    return count
+
+
 def telegram_message_already_saved(telegram: dict) -> bool:
     key = telegram_message_key(telegram)
     resp = requests.post(
@@ -432,6 +446,7 @@ def main():
         sys.exit(1)
 
     try:
+        notion_api_probe()
         items, max_update_id = get_telegram_updates()
         failures = []
         for item in items:
