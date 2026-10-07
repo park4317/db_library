@@ -5,6 +5,10 @@ on:
     - cron: "*/10 * * * *"   # 10분 간격 폴링 (기존 텔레그램 뉴스봇과 동일 패턴)
   workflow_dispatch: {}       # 수동 실행 버튼
 
+concurrency:
+  group: telegram-db-library-ingestion
+  cancel-in-progress: false
+
 jobs:
   poll-and-process:
     runs-on: ubuntu-latest
