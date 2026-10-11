@@ -25,6 +25,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run pipeline
+        id: run_pipeline
         env:
           # 기존 텔레그램 뉴스봇과 별도의 봇/채널 — 시크릿 이름도 분리
           YOUTUBE_TELEGRAM_BOT_TOKEN: ${{ secrets.YOUTUBE_TELEGRAM_BOT_TOKEN }}
@@ -32,7 +33,43 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
-        run: python youtube_to_notion.py
+        run: |
+          set +e
+          started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          stdout_file="$RUNNER_TEMP/pipeline.stdout"
+          stderr_file="$RUNNER_TEMP/pipeline.stderr"
+          echo "pipeline_started_at_utc=$started_at"
+
+          python youtube_to_notion.py >"$stdout_file" 2>"$stderr_file"
+          exit_code=$?
+
+          ended_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          telegram_items="$(sed -n 's/.*Telegram items=\([0-9][0-9]*\).*/\1/p' "$stdout_file" | tail -n 1)"
+          [ -n "$telegram_items" ] || telegram_items="NOT_REPORTED"
+          new_writes="$(grep -Ec '^\[(Telegram 아카이브 저장 완료|저장 완료|메모 저장 완료)\]' "$stdout_file" || true)"
+          duplicate_skips="$(grep -Ec '^\[중복 건너뜀\]' "$stdout_file" || true)"
+          failure_count="$(grep -c '\[실패:' "$stdout_file" || true)"
+          failure_scopes="$(sed -n 's/.*\[실패:\([^]]*\)\].*/\1/p' "$stdout_file" | sort -u | paste -sd ',' -)"
+          [ -n "$failure_scopes" ] || failure_scopes="none"
+          notion_http="$(sed -n 's/.*\[Notion 연결 확인\] HTTP \([0-9][0-9][0-9]\).*/\1/p' "$stdout_file" | tail -n 1)"
+          [ -n "$notion_http" ] || notion_http="NOT_REPORTED"
+          stderr_lines="$(wc -l < "$stderr_file" | tr -d ' ')"
+          stderr_types="$(grep -hoE '[A-Za-z_][A-Za-z0-9_]*(Error|Exception|Exit)' "$stderr_file" | sort -u | paste -sd ',' -)"
+          [ -n "$stderr_types" ] || stderr_types="none"
+
+          # Emit counters and error classes only. Do not echo message bodies or raw stderr.
+          echo "pipeline_ended_at_utc=$ended_at"
+          echo "pipeline_exit_code=$exit_code"
+          echo "notion_http_status=$notion_http"
+          echo "telegram_items=$telegram_items"
+          echo "notion_new_writes=$new_writes"
+          echo "duplicate_skips=$duplicate_skips"
+          echo "failure_count=$failure_count"
+          echo "failure_scopes=$failure_scopes"
+          echo "stderr_lines=$stderr_lines"
+          echo "stderr_error_types=$stderr_types"
+
+          exit "$exit_code"
 
       - name: Commit updated offset
         run: |
