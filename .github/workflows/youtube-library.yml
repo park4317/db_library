@@ -1,4 +1,4 @@
-name: YouTube -> Notion Library
+name: Telegram -> Notion DB_library
 
 on:
   schedule:
@@ -24,12 +24,11 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Run pipeline
+      - name: Archive Telegram posts
         env:
           # 기존 텔레그램 뉴스봇과 별도의 봇/채널 — 시크릿 이름도 분리
           YOUTUBE_TELEGRAM_BOT_TOKEN: ${{ secrets.YOUTUBE_TELEGRAM_BOT_TOKEN }}
           YOUTUBE_TELEGRAM_CHAT_ID: ${{ secrets.YOUTUBE_TELEGRAM_CHAT_ID }}
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
         run: python youtube_to_notion.py
