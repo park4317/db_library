@@ -81,6 +81,21 @@ def _safe_error_category(exc):
     if status is None and response is not None:
         status = getattr(response, "status_code", None)
     if isinstance(status, int):
+        if status == 400:
+            # Anthropic returns several distinct failures as 400. Inspect only in memory,
+            # then emit a fixed label; never print the response or exception text.
+            body = getattr(exc, "body", None)
+            error = body.get("error", {}) if isinstance(body, dict) else {}
+            detail = str(error.get("message", "")).lower() if isinstance(error, dict) else ""
+            if any(term in detail for term in ("credit", "billing", "spend", "payment", "usage limit")):
+                return "BILLING_LIMIT", status
+            if "model" in detail:
+                return "MODEL_REQUEST", status
+            if "max_tokens" in detail:
+                return "MAX_TOKENS_REQUEST", status
+            if any(term in detail for term in ("messages", "content", "prompt")):
+                return "MESSAGE_FORMAT", status
+            return "INVALID_REQUEST_OTHER", status
         if status in (401, 403):
             return "AUTH", status
         if status == 429:
