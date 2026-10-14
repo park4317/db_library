@@ -9,6 +9,7 @@ on:
       - "requirements.txt"
       - "tests/test_offline.py"
       - ".github/workflows/validate-db-library.yml"
+      - ".github/workflows/enrich-library.yml"
   workflow_dispatch: {}
 
 jobs:
@@ -29,3 +30,19 @@ jobs:
           python -c "import youtube_to_notion, ai_adapter, enrich_db_library"
       - name: Offline ingestion and provider fallback checks
         run: PYTHONPATH=. python tests/test_offline.py
+      - name: Validate enrichment workflow configuration
+        run: |
+          python -m pip install PyYAML
+          python - <<'PY'
+          import yaml
+          with open(".github/workflows/enrich-library.yml", encoding="utf-8") as handle:
+              workflow = yaml.safe_load(handle)
+          trigger = workflow.get("on", workflow.get(True, {}))
+          assert "message_range" in trigger["workflow_dispatch"]["inputs"]
+          step = workflow["jobs"]["enrich-pending"]["steps"][-1]
+          required = {"NOTION_API_KEY", "NOTION_DATABASE_ID", "YOUTUBE_TELEGRAM_CHAT_ID", "GEMINI_API_KEY", "ANTHROPIC_API_KEY", "MESSAGE_RANGE"}
+          assert required <= set(step["env"])
+          assert "python enrich_db_library.py --limit 25" in step["run"]
+          assert "python enrich_db_library.py --message-range" in step["run"]
+          print("workflow configuration: PASS")
+          PY
