@@ -3,7 +3,12 @@ name: DB_library AI enrichment
 on:
   schedule:
     - cron: "55 21 * * *"   # 06:55 Asia/Seoul; independent of raw ingestion
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      message_range:
+        description: "Explicit legacy Telegram IDs, for example 166:171; blank processes pending rows"
+        required: false
+        type: string
 
 concurrency:
   group: db-library-ai-enrichment
@@ -30,4 +35,13 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           AI_PROVIDER: gemini
           AI_FALLBACK_PROVIDER: claude
-        run: python enrich_db_library.py --limit 25
+          MESSAGE_RANGE: ${{ inputs.message_range }}
+        run: |
+          if [ -z "$MESSAGE_RANGE" ]; then
+            python enrich_db_library.py --limit 25
+          elif [[ "$MESSAGE_RANGE" =~ ^[0-9]+:[0-9]+$ ]]; then
+            python enrich_db_library.py --message-range "$MESSAGE_RANGE"
+          else
+            echo "ENRICHMENT_FAIL category=INVALID_MESSAGE_RANGE"
+            exit 1
+          fi
