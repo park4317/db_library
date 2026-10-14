@@ -50,6 +50,24 @@ def pending_pages(limit):
     return collected[:limit]
 
 
+def explicit_pages(message_ids):
+    """One-time legacy backfill by exact Telegram message IDs, never by fuzzy text."""
+    pages = []
+    channel_id = os.environ.get("YOUTUBE_TELEGRAM_CHAT_ID")
+    if not channel_id:
+        raise ValueError("CHANNEL_ID_REQUIRED_FOR_BACKFILL")
+    for message_id in message_ids:
+        key = f"{channel_id}:{message_id}"
+        result = notion("POST", f"https://api.notion.com/v1/databases/{DATABASE_ID}/query",
+                        json={"filter": {"property": "Telegram Message ID",
+                                         "rich_text": {"equals": key}}})
+        matches = result.get("results", [])
+        if len(matches) != 1:
+            raise ValueError("BACKFILL_ID_NOT_UNIQUE_OR_MISSING")
+        pages.extend(matches)
+    return pages
+
+
 def page_body(page_id):
     chunks = []
     cursor = None
@@ -83,6 +101,7 @@ def update_page(page_id, result):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=25)
+    parser.add_argument("--message-range", help="Explicit legacy Telegram message ID range, e.g. 166:171")
     args = parser.parse_args()
     if not NOTION_KEY or not DATABASE_ID:
         print("ENRICHMENT_FAIL category=ENV_MISSING")
@@ -91,7 +110,13 @@ def main():
         print("ENRICHMENT_FAIL category=INVALID_LIMIT")
         return 1
     try:
-        pages = pending_pages(args.limit)
+        if args.message_range:
+            start, end = (int(value) for value in args.message_range.split(":"))
+            if start < 1 or end < start or end - start >= 100:
+                raise ValueError("INVALID_MESSAGE_RANGE")
+            pages = explicit_pages(range(start, end + 1))
+        else:
+            pages = pending_pages(args.limit)
     except Exception as exc:
         print(f"ENRICHMENT_FAIL stage=NOTION_QUERY category={type(exc).__name__}")
         return 1
