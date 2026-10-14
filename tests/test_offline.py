@@ -42,5 +42,17 @@ with patch.object(collector, "saved", side_effect=[False, True]), \
 with patch.object(collector, "saved", return_value=True):
     assert collector.archive(post) == "duplicate"
 
+
+class FakeBadRequest:
+    status_code = 400
+
+    def __init__(self, detail):
+        self.body = {"error": {"message": detail}}
+
+
+assert ai_adapter._safe_error_category(FakeBadRequest("credit balance exhausted")) == ("BILLING_LIMIT", 400)
+assert ai_adapter._safe_error_category(FakeBadRequest("model not available")) == ("MODEL_REQUEST", 400)
+assert ai_adapter._safe_error_category(FakeBadRequest("unrecognized argument")) == ("INVALID_REQUEST_OTHER", 400)
+
 print("OFFLINE_GATES=PASS gemini_primary=PASS claude_fallback=PASS both_fail_preserves_raw=PASS collector_ai_independent=PASS")
 
