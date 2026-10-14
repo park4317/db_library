@@ -45,7 +45,7 @@ def _claude(prompt):
     if not key:
         raise EnrichmentUnavailable("CLAUDE_KEY_MISSING")
     from anthropic import Anthropic
-    client = Anthropic(api_key=key)
+    client = Anthropic(api_key=key, max_retries=0, timeout=45)
     model = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-5")
     response = client.messages.create(
         model=model, max_tokens=900,
@@ -74,6 +74,33 @@ def _validate(raw):
             "tags": [tag.strip()[:100] for tag in tags], "priority": priority}
 
 
+def _safe_error_category(exc):
+    """Return only a bounded classification, never provider response text."""
+    status = getattr(exc, "status_code", None)
+    response = getattr(exc, "response", None)
+    if status is None and response is not None:
+        status = getattr(response, "status_code", None)
+    if isinstance(status, int):
+        if status in (401, 403):
+            return "AUTH", status
+        if status == 429:
+            return "RATE_LIMIT", status
+        if 400 <= status < 500:
+            return "HTTP_4XX", status
+        if 500 <= status < 600:
+            return "HTTP_5XX", status
+    name = type(exc).__name__
+    if "Timeout" in name:
+        return "TIMEOUT", None
+    if name in ("ConnectionError", "APIConnectionError"):
+        return "CONNECTION", None
+    if isinstance(exc, (ValueError, KeyError, IndexError, TypeError)):
+        return "RESPONSE_SCHEMA", None
+    if isinstance(exc, EnrichmentUnavailable):
+        return "CONFIG", None
+    return "UNKNOWN", None
+
+
 def enrich(text, title, channel):
     """Return validated fields plus `_provider`; never include key or raw response in errors."""
     primary = os.environ.get("AI_PROVIDER", "gemini").lower()
@@ -85,7 +112,10 @@ def enrich(text, title, channel):
             result = _validate(PROVIDERS[provider](_prompt(text, title, channel)))
             result["_provider"] = provider
             return result
-        except Exception:
+        except Exception as exc:
+            category, status = _safe_error_category(exc)
+            status_label = str(status) if status is not None else "NA"
+            print(f"AI_PROVIDER_FAIL provider={provider} category={category} status={status_label}", flush=True)
             continue
     raise EnrichmentUnavailable("AI_ENRICHMENT_FAILED")
 
