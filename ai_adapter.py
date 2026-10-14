@@ -27,17 +27,31 @@ def _gemini(prompt):
     key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
     if not key:
         raise EnrichmentUnavailable("GEMINI_KEY_MISSING")
-    model = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
-    response = requests.post(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-        headers={"x-goog-api-key": key, "Content-Type": "application/json"},
-        json={"contents": [{"parts": [{"text": prompt}]}],
-              "generationConfig": {"responseMimeType": "application/json"}},
-        timeout=45,
-    )
-    response.raise_for_status()
-    parts = response.json()["candidates"][0]["content"]["parts"]
-    return "".join(part.get("text", "") for part in parts)
+    primary = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
+    capacity_fallback = os.environ.get("GEMINI_CAPACITY_FALLBACK_MODEL", "gemini-3.6-flash")
+    models = [primary]
+    if capacity_fallback != primary:
+        models.append(capacity_fallback)
+    last_error = None
+    for index, model in enumerate(models):
+        try:
+            response = requests.post(
+                f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                headers={"x-goog-api-key": key, "Content-Type": "application/json"},
+                json={"contents": [{"parts": [{"text": prompt}]}],
+                      "generationConfig": {"responseMimeType": "application/json"}},
+                timeout=45,
+            )
+            response.raise_for_status()
+            parts = response.json()["candidates"][0]["content"]["parts"]
+            return "".join(part.get("text", "") for part in parts)
+        except (requests.exceptions.Timeout, requests.exceptions.HTTPError) as exc:
+            last_error = exc
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            if index + 1 == len(models) or (status != 503 and not isinstance(exc, requests.exceptions.Timeout)):
+                raise
+            print("AI_MODEL_CAPACITY_FALLBACK provider=gemini", flush=True)
+    raise last_error
 
 
 def _claude(prompt):
