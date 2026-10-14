@@ -133,10 +133,10 @@ def commit_update_offset(update_id: int) -> None:
 
 
 def safe_error(error: Exception) -> str:
-    value = str(error)
-    if TELEGRAM_BOT_TOKEN:
-        value = value.replace(TELEGRAM_BOT_TOKEN, "[REDACTED]")
-    return f"{type(error).__name__}: {value[:300]}"
+    """Public runner logs contain only an exception category and HTTP status."""
+    if isinstance(error, requests.HTTPError) and error.response is not None:
+        return f"HTTP_ERROR status={error.response.status_code}"
+    return type(error).__name__
 
 
 def telegram_message_key(telegram: dict) -> str:
@@ -194,10 +194,10 @@ def get_transcript(video_id: str) -> str | None:
         fetched = transcript.fetch()
         return " ".join(seg["text"] for seg in fetched.to_raw_data())
     except (TranscriptsDisabled, NoTranscriptFound, VideoUnavailable) as e:
-        print(f"[자막 없음] {video_id}: {e}")
+        print(f"[자막 없음] category={type(e).__name__}")
         return None
     except Exception as e:
-        print(f"[자막 추출 실패] {video_id}: {e}")
+        print(f"[자막 추출 실패] category={type(e).__name__}")
         return None
 
 
@@ -308,7 +308,7 @@ def save_telegram_message_to_notion(text: str, telegram: dict) -> dict | None:
     """Archive one Telegram channel post in the existing DB_library, once per message ID."""
     key = telegram_message_key(telegram)
     if telegram_message_already_saved(telegram):
-        print(f"[중복 건너뜀] telegram_message_id={key}")
+        print("[중복 건너뜀] source=telegram")
         return None
 
     title = next((line.strip() for line in text.splitlines() if line.strip()), "Telegram 첨부 게시물")
@@ -318,7 +318,7 @@ def save_telegram_message_to_notion(text: str, telegram: dict) -> dict | None:
         "Title": {"title": [{"text": {"content": title}}]},
         "채널명": {"rich_text": [{"text": {"content": str(telegram.get("chat_title") or "DB_library")[:200]}}]},
         "수집일": {"date": {"start": now}},
-        "요약": {"rich_text": [{"text": {"content": text[:1800]}}]},
+        "요약": {"rich_text": [{"text": {"content": "SUMMARY_PENDING"}}]},
         "구분": {"select": {"name": "메모"}},
         "Telegram Message ID": {"rich_text": [{"text": {"content": key}}]},
         "Telegram Channel ID": {"rich_text": [{"text": {"content": str(telegram.get("chat_id", ""))}}]},
@@ -349,7 +349,9 @@ def save_telegram_message_to_notion(text: str, telegram: dict) -> dict | None:
     )
     resp.raise_for_status()
     result = resp.json()
-    print(f"[Telegram 적재 완료] telegram_message_id={key} page_id={result.get('id', '')}")
+    if not telegram_message_already_saved(telegram):
+        raise RuntimeError("NOTION_READBACK_FAILED")
+    print("[Telegram 적재 완료] read_back=PASS")
     return result
 
 
@@ -395,13 +397,13 @@ def save_to_notion(meta: dict, analysis: dict, transcript: str):
 def process_url(url: str):
     m = YOUTUBE_URL_RE.search(url)
     if not m:
-        print(f"[스킵] 유튜브 URL 아님: {url}")
+        print("[스킵] 유튜브 URL 아님")
         return
     video_id = m.group(1)
     canonical_url = f"https://www.youtube.com/watch?v={video_id}"
 
     if url_already_saved(canonical_url):
-        print(f"[스킵] 이미 저장됨: {canonical_url}")
+        print("[스킵] 영상 URL 중복")
         return
 
     meta = get_video_metadata(video_id)
@@ -420,7 +422,7 @@ def process_url(url: str):
         analysis = summarize_and_tag(meta["title"], meta["channel"], transcript)
 
     save_to_notion(meta, analysis, transcript)
-    print(f"[저장 완료] {meta['title']}")
+    print("[영상 보강 완료]")
 
 
 def main():
@@ -429,7 +431,6 @@ def main():
     args = parser.parse_args()
 
     missing = [k for k, v in {
-        "ANTHROPIC_API_KEY": ANTHROPIC_API_KEY,
         "NOTION_API_KEY": NOTION_API_KEY,
         "NOTION_DATABASE_ID": NOTION_DATABASE_ID,
     }.items() if not v]
@@ -448,26 +449,30 @@ def main():
     try:
         notion_api_probe()
         items, max_update_id = get_telegram_updates()
+        archive_items = [item for item in items if item["kind"] == "telegram"]
+        video_items = [item for item in items if item["kind"] == "video"]
         failures = []
-        for item in items:
-            update_id = item.get("update_id", "manual")
+        for item in archive_items:
             try:
-                if item["kind"] == "telegram":
-                    save_telegram_message_to_notion(item["text"], item["telegram"])
-                elif item["kind"] == "video":
-                    process_url(item["url"])
+                save_telegram_message_to_notion(item["text"], item["telegram"])
             except Exception as e:
-                failures.append(update_id)
-                timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
-                print(f"[{timestamp}] [적재 실패] update_id={update_id} {safe_error(e)}")
+                failures.append(item["update_id"])
+                print(f"[원문 적재 실패] update_id={item['update_id']} category={safe_error(e)}")
 
         if failures:
-            raise RuntimeError(f"{len(failures)} item(s) failed; Telegram offset was not advanced")
+            raise RuntimeError(f"ARCHIVE_FAILED count={len(failures)}; offset unchanged")
 
-        if not items:
-            print("새 Telegram 게시물 없음")
         commit_update_offset(max_update_id)
-        print(f"[정상 종료] offset={max_update_id} Telegram items={len(items)}")
+        print(f"[원문 수집 완료] telegram_count={len(archive_items)} offset={max_update_id}")
+        if not ANTHROPIC_API_KEY:
+            print(f"[영상 AI 보강 대기] status=SUMMARY_PENDING count={len(video_items)}")
+        else:
+            for item in video_items:
+                try:
+                    process_url(item["url"])
+                except Exception as e:
+                    print(f"[영상 AI 보강 실패] category={safe_error(e)}")
+            print(f"[영상 AI 보강 종료] attempted={len(video_items)}")
     except Exception as e:
         timestamp = datetime.now().astimezone().isoformat(timespec="seconds")
         print(f"[{timestamp}] [수집 실패] {safe_error(e)}")
