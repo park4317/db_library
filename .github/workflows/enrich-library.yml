@@ -35,7 +35,6 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           AI_PROVIDER: gemini
           AI_FALLBACK_PROVIDER: claude
-        env:
           MESSAGE_RANGE: ${{ inputs.message_range }}
         run: |
           if [ -z "$MESSAGE_RANGE" ]; then
