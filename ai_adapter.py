@@ -46,7 +46,7 @@ def _claude(prompt):
         raise EnrichmentUnavailable("CLAUDE_KEY_MISSING")
     from anthropic import Anthropic
     client = Anthropic(api_key=key, max_retries=0, timeout=45)
-    model = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-5")
+    model = os.environ.get("CLAUDE_MODEL", "claude-sonnet-4-6")
     response = client.messages.create(
         model=model, max_tokens=900,
         messages=[{"role": "user", "content": prompt}],
