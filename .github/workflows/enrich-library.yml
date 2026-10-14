@@ -1,0 +1,33 @@
+name: DB_library AI enrichment
+
+on:
+  schedule:
+    - cron: "55 21 * * *"   # 06:55 Asia/Seoul; independent of raw ingestion
+  workflow_dispatch: {}
+
+concurrency:
+  group: db-library-ai-enrichment
+  cancel-in-progress: false
+
+jobs:
+  enrich-pending:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Enrich pending archive rows
+        env:
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+          YOUTUBE_TELEGRAM_CHAT_ID: ${{ secrets.YOUTUBE_TELEGRAM_CHAT_ID }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          AI_PROVIDER: gemini
+          AI_FALLBACK_PROVIDER: claude
+        run: python enrich_db_library.py --limit 25

@@ -1,0 +1,31 @@
+name: DB_library Python 3.11 validation
+
+on:
+  pull_request:
+    paths:
+      - "youtube_to_notion.py"
+      - "ai_adapter.py"
+      - "enrich_db_library.py"
+      - "requirements.txt"
+      - "tests/test_offline.py"
+      - ".github/workflows/validate-db-library.yml"
+  workflow_dispatch: {}
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install declared dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Syntax and import check
+        run: |
+          python -m py_compile youtube_to_notion.py ai_adapter.py enrich_db_library.py
+          python -c "import youtube_to_notion, ai_adapter, enrich_db_library"
+      - name: Offline ingestion and provider fallback checks
+        run: PYTHONPATH=. python tests/test_offline.py
