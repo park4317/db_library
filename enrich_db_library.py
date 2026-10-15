@@ -64,7 +64,10 @@ def explicit_pages(message_ids):
         matches = result.get("results", [])
         if len(matches) != 1:
             raise ValueError("BACKFILL_ID_NOT_UNIQUE_OR_MISSING")
-        pages.extend(matches)
+        page = matches[0]
+        # A range may include rows already enriched; never overwrite them during recovery.
+        if plain(page.get("properties", {}).get("요약", {}), "rich_text") == "SUMMARY_PENDING":
+            pages.append(page)
     return pages
 
 
