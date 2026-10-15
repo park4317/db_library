@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import time
 
 import requests
 
@@ -33,26 +34,33 @@ def _gemini(prompt):
     if capacity_fallback != primary:
         models.append(capacity_fallback)
     last_error = None
-    for index, model in enumerate(models):
-        try:
-            response = requests.post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-                headers={"x-goog-api-key": key, "Content-Type": "application/json"},
-                json={"contents": [{"parts": [{"text": prompt}]}],
-                      "generationConfig": {"responseMimeType": "application/json"}},
-                timeout=45,
-            )
-            response.raise_for_status()
-            parts = response.json()["candidates"][0]["content"]["parts"]
-            return "".join(part.get("text", "") for part in parts)
-        except (requests.exceptions.Timeout, requests.exceptions.HTTPError) as exc:
-            last_error = exc
-            status = getattr(getattr(exc, "response", None), "status_code", None)
-            if index + 1 == len(models) or (status != 503 and not isinstance(exc, requests.exceptions.Timeout)):
+    for model_index, model in enumerate(models):
+        attempts = 2 if model_index == 0 else 1
+        for attempt in range(attempts):
+            try:
+                response = requests.post(
+                    f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+                    headers={"x-goog-api-key": key, "Content-Type": "application/json"},
+                    json={"contents": [{"parts": [{"text": prompt}]}],
+                          "generationConfig": {"responseMimeType": "application/json"}},
+                    timeout=45,
+                )
+                response.raise_for_status()
+                parts = response.json()["candidates"][0]["content"]["parts"]
+                return "".join(part.get("text", "") for part in parts)
+            except (requests.exceptions.Timeout, requests.exceptions.HTTPError) as exc:
+                last_error = exc
+                status = getattr(getattr(exc, "response", None), "status_code", None)
+                retryable = status == 503
+                if model_index == 0 and attempt == 0 and retryable:
+                    print("AI_RETRY provider=gemini category=HTTP_5XX status=503", flush=True)
+                    time.sleep(2)
+                    continue
+                if model_index == 0 and model_index + 1 < len(models) and retryable:
+                    print("AI_MODEL_CAPACITY_FALLBACK provider=gemini category=HTTP_5XX status=503", flush=True)
+                    break
                 raise
-            print("AI_MODEL_CAPACITY_FALLBACK provider=gemini", flush=True)
     raise last_error
-
 
 def _claude(prompt):
     key = os.environ.get("ANTHROPIC_API_KEY")
@@ -144,6 +152,8 @@ def enrich(text, title, channel):
         except Exception as exc:
             category, status = _safe_error_category(exc)
             status_label = str(status) if status is not None else "NA"
+            if provider == "claude" and category == "BILLING_LIMIT":
+                category = "CLAUDE_BILLING_LIMIT"
             print(f"AI_PROVIDER_FAIL provider={provider} category={category} status={status_label}", flush=True)
             continue
     raise EnrichmentUnavailable("AI_ENRICHMENT_FAILED")

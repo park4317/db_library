@@ -6,7 +6,7 @@ import sys
 
 import requests
 
-from ai_adapter import EnrichmentUnavailable, enrich
+from ai_adapter import EnrichmentUnavailable, PROVIDERS, enrich
 
 try:
     from dotenv import load_dotenv
@@ -109,6 +109,11 @@ def main():
     if not 1 <= args.limit <= 100:
         print("ENRICHMENT_FAIL category=INVALID_LIMIT")
         return 1
+    primary = os.environ.get("AI_PROVIDER", "gemini").lower()
+    fallback = os.environ.get("AI_FALLBACK_PROVIDER", "claude").lower()
+    if primary not in PROVIDERS or fallback not in PROVIDERS:
+        print("ENRICHMENT_FAIL category=AI_PROVIDER_CONFIG")
+        return 1
     try:
         if args.message_range:
             start, end = (int(value) for value in args.message_range.split(":"))
@@ -121,23 +126,46 @@ def main():
         print(f"ENRICHMENT_FAIL stage=NOTION_QUERY category={type(exc).__name__}")
         return 1
     counts = {"gemini": 0, "claude": 0, "failed": 0}
+    fatal_category = None
     for page in pages:
+        props = page.get("properties", {})
+        title = plain(props.get("Title", {}), "title")
+        channel = plain(props.get("채널명", {}), "rich_text")
         try:
-            props = page.get("properties", {})
-            title = plain(props.get("Title", {}), "title")
-            channel = plain(props.get("채널명", {}), "rich_text")
             body = page_body(page["id"])
-            if not body.strip():
-                raise EnrichmentUnavailable("EMPTY_BODY")
-            result = enrich(body, title, channel)
-            update_page(page["id"], result)
-            counts[result["_provider"]] += 1
-            print(f"ENRICHED provider={result['_provider']}")
         except Exception as exc:
+            fatal_category = type(exc).__name__
+            print(f"ENRICHMENT_FAIL stage=NOTION_READ category={fatal_category}")
+            break
+        if not body.strip():
+            fatal_category = "SOURCE_BODY_EMPTY"
+            print("ENRICHMENT_FAIL stage=NOTION_READ category=SOURCE_BODY_EMPTY")
+            break
+        try:
+            result = enrich(body, title, channel)
+        except EnrichmentUnavailable:
             counts["failed"] += 1
-            print(f"AI_ENRICHMENT_FAILED category={type(exc).__name__}")
-    print(f"ENRICHMENT_DONE pending_seen={len(pages)} gemini={counts['gemini']} claude={counts['claude']} failed={counts['failed']}")
-    return 0 if not counts["failed"] else 2
+            print("AI_ENRICHMENT_FAILED category=PROVIDER_UNAVAILABLE")
+            continue
+        try:
+            update_page(page["id"], result)
+        except Exception as exc:
+            fatal_category = type(exc).__name__
+            print(f"ENRICHMENT_FAIL stage=NOTION_WRITE category={fatal_category}")
+            break
+        counts[result["_provider"]] += 1
+        print(f"ENRICHED provider={result['_provider']}")
+    if fatal_category:
+        return 1
+    if counts["failed"] == 0:
+        status = "ENRICHMENT_PASS"
+    elif counts["gemini"] + counts["claude"]:
+        status = "ENRICHMENT_PASS_WITH_WARNING"
+    else:
+        status = "ENRICHMENT_WARNING"
+    log_status = "PASS" if status == "ENRICHMENT_PASS" else "PASS_WITH_WARNING" if status == "ENRICHMENT_PASS_WITH_WARNING" else "WARNING"
+    print(f"ENRICHMENT_DONE pending_seen={len(pages)} gemini={counts['gemini']} claude={counts['claude']} failed={counts['failed']} status={log_status} outcome={status}")
+    return 0
 
 
 if __name__ == "__main__":
